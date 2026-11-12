@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 import feedparser
 import requests
 import datetime
@@ -8,20 +9,21 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
+def gnews(query):
+    return "https://news.google.com/rss/search?q=" + quote(query + " when:1d") + "&hl=ar&gl=EG&ceid=EG:ar"
+
 FEEDS = [
-    {"url": "https://www.filgoal.com/rss/", "cat": "football", "source": "FilGoal"},
-    {"url": "https://www.yallakora.com/rss/", "cat": "football", "source": "Yalla Kora"},
-    {"url": "https://arabic.goal.com/ar/rss/news/", "cat": "football", "source": "Goal عربي"},
-    {"url": "https://www.masrawy.com/rss/news", "cat": "politics", "source": "مصراوي"},
-    {"url": "https://www.youm7.com/rss/Section/1/0", "cat": "politics", "source": "اليوم السابع"},
-    {"url": "https://gate.ahram.org.eg/rss/RssFeeds.aspx?feedName=1", "cat": "politics", "source": "الأهرام"},
-    {"url": "https://www.amwalalghad.com/feed/", "cat": "economy", "source": "أموال الغد"},
-    {"url": "https://www.youm7.com/rss/Section/97/0", "cat": "economy", "source": "اليوم السابع اقتصاد"},
+    {"url": gnews("كرة القدم"), "cat": "football"},
+    {"url": gnews("الدوري المصري"), "cat": "football"},
+    {"url": gnews("الأهلي الزمالك"), "cat": "football"},
+    {"url": gnews("سياسة مصر"), "cat": "politics"},
+    {"url": gnews("أخبار مصر عاجل"), "cat": "politics"},
+    {"url": gnews("اقتصاد مصر"), "cat": "economy"},
+    {"url": gnews("البورصة المصرية الدولار"), "cat": "economy"},
 ]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    "Accept": "application/rss+xml, application/xml, text/xml, */*",
     "Accept-Language": "ar,en;q=0.8",
 }
 
@@ -32,21 +34,31 @@ def parse_date(entry):
 
 def fetch_feed(feed):
     try:
-        r = requests.get(feed["url"], headers=HEADERS, timeout=6)
+        r = requests.get(feed["url"], headers=HEADERS, timeout=7)
         parsed = feedparser.parse(r.content)
-        items = [{
-            "title": e.get("title", ""),
-            "link": e.get("link", ""),
-            "date": parse_date(e),
-            "cat": feed["cat"],
-            "source": feed["source"],
-        } for e in parsed.entries[:10]]
-        return {"source": feed["source"], "status": r.status_code, "count": len(items), "items": items}
+        items = []
+        for e in parsed.entries[:15]:
+            title = e.get("title", "")
+            src = ""
+            try:
+                src = e.source.title
+            except Exception:
+                pass
+            if src and title.endswith(" - " + src):
+                title = title[: -len(" - " + src)]
+            items.append({
+                "title": title,
+                "link": e.get("link", ""),
+                "date": parse_date(e),
+                "cat": feed["cat"],
+                "source": src or "Google News",
+            })
+        return {"cat": feed["cat"], "status": r.status_code, "count": len(items), "items": items}
     except Exception as ex:
-        return {"source": feed["source"], "status": "error: " + str(ex)[:80], "count": 0, "items": []}
+        return {"cat": feed["cat"], "status": "error: " + str(ex)[:80], "count": 0, "items": []}
 
 def fetch_all():
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         return list(pool.map(fetch_feed, FEEDS))
 
 @app.route("/")
@@ -56,9 +68,13 @@ def index():
 @app.route("/news")
 @app.route("/api/news")
 def news():
-    items = []
+    seen, items = set(), []
     for res in fetch_all():
-        items.extend(res["items"])
+        for it in res["items"]:
+            key = it["title"].strip()
+            if key and key not in seen:
+                seen.add(key)
+                items.append(it)
     items.sort(key=lambda x: x["date"], reverse=True)
     return jsonify(items)
 
