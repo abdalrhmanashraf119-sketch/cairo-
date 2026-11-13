@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
@@ -6,6 +6,7 @@ import feedparser
 import requests
 import datetime
 import re
+from googlenewsdecoder import gnewsdecoder
 
 app = Flask(__name__)
 CORS(app)
@@ -62,25 +63,38 @@ def fetch_all():
     with ThreadPoolExecutor(max_workers=7) as pool:
         return list(pool.map(fetch_feed, FEEDS))
 
-def get_og_image(url):
-    """سحب og:image من صفحة الخبر"""
+def resolve_url(url):
+    """لينكات Google News بتحوّل لصفحة وسيطة، لازم نفك اللينك للمقال الأصلي الأول"""
+    if "news.google.com" not in url:
+        return url
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5, allow_redirects=True)
-        # ابحث عن og:image في الـ HTML
-        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']', r.text, re.IGNORECASE)
-        if not match:
-            # جرب الترتيب العكسي (content قبل property)
-            match = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']', r.text, re.IGNORECASE)
-        if match:
-            return match.group(1)
+        res = gnewsdecoder(url, timeout=8)
+        if res.get("success") and res.get("decoded_url"):
+            return res["decoded_url"]
     except Exception:
         pass
     return None
 
-def fetch_image_for_item(item):
-    """إضافة الصورة لخبر واحد"""
-    item["image"] = get_og_image(item["link"])
-    return item
+def get_og_image(url):
+    """سحب og:image من صفحة المقال الأصلي"""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=6, allow_redirects=True)
+        html = r.text[:200000]
+        for pat in (
+            r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        ):
+            m = re.search(pat, html, re.IGNORECASE)
+            if m:
+                img = m.group(1).replace("&amp;", "&")
+                if img.startswith("//"):
+                    img = "https:" + img
+                if img.startswith("http") and "googleusercontent.com" not in img:
+                    return img
+    except Exception:
+        pass
+    return None
 
 @app.route("/")
 def index():
@@ -99,24 +113,15 @@ def news():
     items.sort(key=lambda x: x["date"], reverse=True)
     return jsonify(items)
 
-@app.route("/news-with-images")
-@app.route("/api/news-with-images")
-def news_with_images():
-    """نفس /news بس بيضيف og:image لكل خبر"""
-    seen, items = set(), []
-    for res in fetch_all():
-        for it in res["items"]:
-            key = it["title"].strip()
-            if key and key not in seen:
-                seen.add(key)
-                items.append(it)
-    items.sort(key=lambda x: x["date"], reverse=True)
-
-    # سحب الصور بالتوازي (max 10 workers عشان متضغطش على الـ servers)
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        items = list(pool.map(fetch_image_for_item, items))
-
-    return jsonify(items)
+@app.route("/image")
+def image():
+    """بيرجّع صورة خبر واحد (بيتندهي لما تضغط استوديو بس)"""
+    link = request.args.get("url", "")
+    if not link.startswith("http"):
+        return jsonify({"image": None, "error": "bad url"}), 400
+    real = resolve_url(link)
+    img = get_og_image(real) if real else None
+    return jsonify({"image": img, "article": real})
 
 @app.route("/debug")
 def debug():
