@@ -123,6 +123,19 @@ def image():
     img = get_og_image(real) if real else None
     return jsonify({"image": img, "article": real})
 
+@app.route("/image-test")
+def image_test():
+    """اختبار سريع: بياخد أول 4 أخبار ويجرب يجيب صورهم"""
+    items = []
+    for res in fetch_all():
+        items.extend(res["items"])
+    items = items[:4]
+    out = []
+    for it in items:
+        real = resolve_url(it["link"])
+        out.append({"title": it["title"], "article": real, "image": get_og_image(real) if real else None})
+    return jsonify(out)
+
 @app.route("/debug")
 def debug():
     return jsonify([{k: v for k, v in r.items() if k != "items"} for r in fetch_all()])
