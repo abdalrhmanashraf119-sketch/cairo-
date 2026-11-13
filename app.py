@@ -8,7 +8,8 @@ import datetime
 import re
 import socket
 import ipaddress
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
+from html import unescape as html_unescape
 from googlenewsdecoder import gnewsdecoder
 
 app = Flask(__name__)
@@ -78,23 +79,40 @@ def resolve_url(url):
         pass
     return None
 
+def _attrs(tag):
+    out = {}
+    for k, v1, v2 in re.findall(r"([a-zA-Z][\w:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag):
+        out[k.lower()] = v1 or v2
+    return out
+
 def get_og_image(url):
-    """سحب og:image من صفحة المقال الأصلي"""
+    """سحب صورة المقال: og:image ثم twitter:image ثم image_src ثم JSON-LD"""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=6, allow_redirects=True)
-        html = r.text[:200000]
-        for pat in (
-            r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-        ):
-            m = re.search(pat, html, re.IGNORECASE)
-            if m:
-                img = m.group(1).replace("&amp;", "&")
-                if img.startswith("//"):
-                    img = "https:" + img
-                if img.startswith("http") and "googleusercontent.com" not in img:
-                    return img
+        r = requests.get(url, headers=HEADERS, timeout=7, allow_redirects=True)
+        if r.status_code >= 400:
+            return None
+        html = r.text[:300000]
+        base = r.url
+        metas = {}
+        for tag in re.findall(r"<meta\b[^>]*>", html, re.I):
+            a = _attrs(tag)
+            key = (a.get("property") or a.get("name") or "").lower()
+            if key and a.get("content"):
+                metas.setdefault(key, a["content"])
+        cands = []
+        for k in ("og:image", "og:image:secure_url", "og:image:url", "twitter:image", "twitter:image:src"):
+            if metas.get(k):
+                cands.append(metas[k])
+        m = re.search(r"<link\b[^>]*rel=[\"']image_src[\"'][^>]*>", html, re.I)
+        if m and _attrs(m.group(0)).get("href"):
+            cands.append(_attrs(m.group(0))["href"])
+        m = re.search(r'"image"\s*:\s*(?:\[\s*)?(?:\{[^}]*?"url"\s*:\s*)?"([^"]+)"', html)
+        if m:
+            cands.append(m.group(1).replace("\\/", "/"))
+        for c in cands:
+            img = urljoin(base, html_unescape(c.strip()))
+            if img.startswith("http") and "googleusercontent.com" not in img:
+                return img
     except Exception:
         pass
     return None
@@ -157,19 +175,34 @@ def is_public_host(url):
 def img_proxy():
     """بيمرّر الصورة من عندنا عشان الكانفس يقدر يصدّر PNG/فيديو بدون CORS"""
     url = request.args.get("url", "")
+    ref = request.args.get("ref", "")
     if not is_public_host(url):
         return jsonify({"error": "bad url"}), 400
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8, stream=True)
-        ctype = r.headers.get("Content-Type", "")
-        if not ctype.startswith("image/"):
-            return jsonify({"error": "not an image"}), 400
-        data = r.raw.read(8 * 1024 * 1024 + 1, decode_content=True)
-        if len(data) > 8 * 1024 * 1024:
-            return jsonify({"error": "too large"}), 413
-        return Response(data, content_type=ctype, headers={"Cache-Control": "public, max-age=3600"})
-    except Exception:
-        return jsonify({"error": "fetch failed"}), 502
+    pu = urlparse(url)
+    refs = []
+    if ref.startswith("http"):
+        refs.append(ref)
+    refs.append(pu.scheme + "://" + pu.netloc + "/")
+    refs.append(None)
+    for rf in refs:
+        try:
+            h = dict(HEADERS)
+            h["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+            if rf:
+                h["Referer"] = rf
+            r = requests.get(url, headers=h, timeout=8, stream=True)
+            if r.status_code >= 400:
+                continue
+            ctype = r.headers.get("Content-Type", "")
+            if not (ctype.startswith("image/") or ctype.startswith("application/octet-stream")):
+                continue
+            data = r.raw.read(8 * 1024 * 1024 + 1, decode_content=True)
+            if len(data) > 8 * 1024 * 1024:
+                return jsonify({"error": "too large"}), 413
+            return Response(data, content_type=ctype, headers={"Cache-Control": "public, max-age=3600"})
+        except Exception:
+            continue
+    return jsonify({"error": "fetch failed"}), 502
 
 @app.route("/debug")
 def debug():
