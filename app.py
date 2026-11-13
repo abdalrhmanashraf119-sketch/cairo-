@@ -5,6 +5,7 @@ from urllib.parse import quote
 import feedparser
 import requests
 import datetime
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -61,6 +62,26 @@ def fetch_all():
     with ThreadPoolExecutor(max_workers=7) as pool:
         return list(pool.map(fetch_feed, FEEDS))
 
+def get_og_image(url):
+    """سحب og:image من صفحة الخبر"""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=5, allow_redirects=True)
+        # ابحث عن og:image في الـ HTML
+        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']', r.text, re.IGNORECASE)
+        if not match:
+            # جرب الترتيب العكسي (content قبل property)
+            match = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']', r.text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+def fetch_image_for_item(item):
+    """إضافة الصورة لخبر واحد"""
+    item["image"] = get_og_image(item["link"])
+    return item
+
 @app.route("/")
 def index():
     return "Cairo Buzz 24 API is running"
@@ -76,6 +97,25 @@ def news():
                 seen.add(key)
                 items.append(it)
     items.sort(key=lambda x: x["date"], reverse=True)
+    return jsonify(items)
+
+@app.route("/news-with-images")
+@app.route("/api/news-with-images")
+def news_with_images():
+    """نفس /news بس بيضيف og:image لكل خبر"""
+    seen, items = set(), []
+    for res in fetch_all():
+        for it in res["items"]:
+            key = it["title"].strip()
+            if key and key not in seen:
+                seen.add(key)
+                items.append(it)
+    items.sort(key=lambda x: x["date"], reverse=True)
+
+    # سحب الصور بالتوازي (max 10 workers عشان متضغطش على الـ servers)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        items = list(pool.map(fetch_image_for_item, items))
+
     return jsonify(items)
 
 @app.route("/debug")
