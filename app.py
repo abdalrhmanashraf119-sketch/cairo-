@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
@@ -6,6 +6,9 @@ import feedparser
 import requests
 import datetime
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse
 from googlenewsdecoder import gnewsdecoder
 
 app = Flask(__name__)
@@ -135,6 +138,38 @@ def image_test():
         real = resolve_url(it["link"])
         out.append({"title": it["title"], "article": real, "image": get_og_image(real) if real else None})
     return jsonify(out)
+
+def is_public_host(url):
+    """حماية: منسمحش بالوصول لعناوين داخلية"""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        for info in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        return True
+    except Exception:
+        return False
+
+@app.route("/img-proxy")
+def img_proxy():
+    """بيمرّر الصورة من عندنا عشان الكانفس يقدر يصدّر PNG/فيديو بدون CORS"""
+    url = request.args.get("url", "")
+    if not is_public_host(url):
+        return jsonify({"error": "bad url"}), 400
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8, stream=True)
+        ctype = r.headers.get("Content-Type", "")
+        if not ctype.startswith("image/"):
+            return jsonify({"error": "not an image"}), 400
+        data = r.raw.read(8 * 1024 * 1024 + 1, decode_content=True)
+        if len(data) > 8 * 1024 * 1024:
+            return jsonify({"error": "too large"}), 413
+        return Response(data, content_type=ctype, headers={"Cache-Control": "public, max-age=3600"})
+    except Exception:
+        return jsonify({"error": "fetch failed"}), 502
 
 @app.route("/debug")
 def debug():
